@@ -47,7 +47,46 @@ class MessageContext:
     before: List[Message]
     after: List[Message]
 
+WHATSMEOW_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'whatsapp.db')
+
+
+def _directory() -> dict:
+    """Map user part of a JID (LID or phone) -> (display name, phone) using whatsmeow's store."""
+    out = {}
+    try:
+        conn = sqlite3.connect(f"file:{WHATSMEOW_DB_PATH}?mode=ro", uri=True)
+        cur = conn.cursor()
+        names = {}
+        for jid, first, full, push, biz in cur.execute(
+                "SELECT their_jid, first_name, full_name, push_name, business_name FROM whatsmeow_contacts"):
+            n = full or first or push or biz
+            if n:
+                names.setdefault(jid.split('@')[0], n)
+        lid_map = dict(cur.execute("SELECT lid, pn FROM whatsmeow_lid_map").fetchall())
+        conn.close()
+    except sqlite3.Error:
+        return out
+    for user, n in names.items():
+        out[user] = (n, lid_map.get(user, user))
+    for lid, pn in lid_map.items():
+        n = names.get(pn) or names.get(lid)
+        out[lid] = (n, pn)
+        if n:
+            out.setdefault(pn, (n, pn))
+    return out
+
+
+def resolve_name(jid: str, fallback: Optional[str] = None) -> Optional[str]:
+    if not jid:
+        return fallback
+    n = _directory().get(jid.split('@')[0], (None, None))[0]
+    return n or fallback
+
+
 def get_sender_name(sender_jid: str) -> str:
+    n = resolve_name(sender_jid)
+    if n:
+        return n
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
@@ -96,6 +135,8 @@ def format_message(message: Message, show_chat_info: bool = True) -> None:
     output = ""
     
     if show_chat_info and message.chat_name:
+        if message.chat_name.isdigit():
+            message.chat_name = resolve_name(message.chat_jid, message.chat_name)
         output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] Chat: {message.chat_name} "
     else:
         output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] "
@@ -372,7 +413,7 @@ def list_chats(
         for chat_data in chats:
             chat = Chat(
                 jid=chat_data[0],
-                name=chat_data[1],
+                name=(chat_data[1] if chat_data[1] and not chat_data[1].isdigit() else resolve_name(chat_data[0], chat_data[1])),
                 last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
                 last_message=chat_data[3],
                 last_sender=chat_data[4],
@@ -412,17 +453,22 @@ def search_contacts(query: str) -> List[Contact]:
         """, (search_pattern, search_pattern))
         
         contacts = cursor.fetchall()
-        
-        result = []
-        for contact_data in contacts:
-            contact = Contact(
-                phone_number=contact_data[0].split('@')[0],
-                name=contact_data[1],
-                jid=contact_data[0]
-            )
-            result.append(contact)
-            
-        return result
+        d = _directory()
+        result, seen = [], set()
+        for jid, name in contacts:
+            n, pn = d.get(jid.split('@')[0], (None, jid.split('@')[0]))
+            result.append(Contact(phone_number=pn, name=n or name, jid=jid)); seen.update({jid.split('@')[0], pn})
+        q = query.lower()
+        chat_jids = {r[0].split('@')[0]: r[0] for r in cursor.execute("SELECT jid FROM chats").fetchall()}
+        for user, (n, pn) in d.items():
+            if user in seen or pn in seen or not n or (q not in n.lower() and q not in pn):
+                continue
+            jid = chat_jids.get(user) or chat_jids.get(pn) or f"{pn}@s.whatsapp.net"
+            if jid.split('@')[0] in seen:
+                continue
+            seen.update({jid.split('@')[0], pn, user})
+            result.append(Contact(phone_number=pn, name=n, jid=jid))
+        return result[:50]
         
     except sqlite3.Error as e:
         print(f"Database error: {e}")
@@ -465,7 +511,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
         for chat_data in chats:
             chat = Chat(
                 jid=chat_data[0],
-                name=chat_data[1],
+                name=(chat_data[1] if chat_data[1] and not chat_data[1].isdigit() else resolve_name(chat_data[0], chat_data[1])),
                 last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
                 last_message=chat_data[3],
                 last_sender=chat_data[4],

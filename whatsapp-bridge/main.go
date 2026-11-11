@@ -591,7 +591,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	}
 
 	// Generate a local path for the file
-	localPath = fmt.Sprintf("%s/%s", chatDir, filename)
+	localPath = fmt.Sprintf("%s/%s%s", chatDir, messageID, filepath.Ext(filename))
 
 	// Get absolute path
 	absPath, err := filepath.Abs(localPath)
@@ -604,6 +604,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 		// File exists, return it
 		return true, mediaType, filename, absPath, nil
 	}
+	_ = filename
 
 	// If we don't have all the media info we need, we can't download
 	if url == "" || len(mediaKey) == 0 || len(fileSHA256) == 0 || len(fileEncSHA256) == 0 || fileLength == 0 {
@@ -631,7 +632,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	}
 
 	downloader := &MediaDownloader{
-		URL:           url,
+		URL:           "",
 		DirectPath:    directPath,
 		MediaKey:      mediaKey,
 		FileLength:    fileLength,
@@ -667,9 +668,6 @@ func extractDirectPathFromURL(url string) string {
 	}
 
 	pathPart := parts[1]
-
-	// Remove query parameters
-	pathPart = strings.SplitN(pathPart, "?", 2)[0]
 
 	// Create proper direct path format
 	return "/" + pathPart

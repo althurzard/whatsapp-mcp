@@ -19,12 +19,12 @@ def _save(d):
     DRAFTS_FILE.write_text(json.dumps(d, ensure_ascii=False, indent=1))
 
 
-def create(kind, recipient, text=None, media_path=None, note=None):
+def create(kind, recipient, text=None, media_path=None, note=None, mentions=None):
     with _lock:
         d = _load()
         did = uuid.uuid4().hex[:8]
         d[did] = {"draftId": did, "kind": kind, "recipient": recipient, "text": text,
-                  "media_path": media_path, "note": note, "state": "pending",
+                  "media_path": media_path, "note": note, "mentions": mentions or [], "state": "pending",
                   "created_at": time.time()}
         _save(d)
         return d[did]

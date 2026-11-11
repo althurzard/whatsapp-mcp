@@ -199,11 +199,12 @@ type SendMessageResponse struct {
 type SendMessageRequest struct {
 	Recipient string `json:"recipient"`
 	Message   string `json:"message"`
-	MediaPath string `json:"media_path,omitempty"`
+	MediaPath string   `json:"media_path,omitempty"`
+	Mentions  []string `json:"mentions,omitempty"`
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string) (bool, string) {
+func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string, mentions []string) (bool, string) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp"
 	}
@@ -356,6 +357,11 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 				FileSHA256:    resp.FileSHA256,
 				FileLength:    &resp.FileLength,
 			}
+		}
+	} else if len(mentions) > 0 {
+		msg.ExtendedTextMessage = &waProto.ExtendedTextMessage{
+			Text:        proto.String(message),
+			ContextInfo: &waProto.ContextInfo{MentionedJID: mentions},
 		}
 	} else {
 		msg.Conversation = proto.String(message)
@@ -675,6 +681,59 @@ func extractDirectPathFromURL(url string) string {
 
 // Start a REST API server to expose the WhatsApp client functionality
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
+	// Group members (jid, phone, lid, name) for @mentions
+	http.HandleFunc("/api/group_members", func(w http.ResponseWriter, r *http.Request) {
+		gjid, err := types.ParseJID(r.URL.Query().Get("jid"))
+		if err != nil || gjid.Server != types.GroupServer {
+			http.Error(w, "jid must be a group JID", http.StatusBadRequest)
+			return
+		}
+		info, err := client.GetGroupInfo(context.Background(), gjid)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		type member struct {
+			JID   string `json:"jid"`
+			Phone string `json:"phone"`
+			LID   string `json:"lid"`
+			Name  string `json:"name"`
+			Admin bool   `json:"admin"`
+		}
+		out := []member{}
+		for _, p := range info.Participants {
+			m := member{JID: p.JID.String(), Admin: p.IsAdmin || p.IsSuperAdmin}
+			if !p.PhoneNumber.IsEmpty() {
+				m.Phone = p.PhoneNumber.User
+			} else if p.JID.Server == types.DefaultUserServer {
+				m.Phone = p.JID.User
+			}
+			if !p.LID.IsEmpty() {
+				m.LID = p.LID.User
+			} else if p.JID.Server == types.HiddenUserServer {
+				m.LID = p.JID.User
+			}
+			for _, j := range []types.JID{p.JID, p.PhoneNumber, p.LID} {
+				if j.IsEmpty() {
+					continue
+				}
+				if c, err := client.Store.Contacts.GetContact(context.Background(), j); err == nil {
+					for _, n := range []string{c.FullName, c.FirstName, c.PushName, c.BusinessName} {
+						if n != "" && m.Name == "" {
+							m.Name = n
+						}
+					}
+				}
+			}
+			if p.DisplayName != "" && m.Name == "" {
+				m.Name = p.DisplayName
+			}
+			out = append(out, m)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"name": info.Name, "members": out})
+	})
+
 	// Handler for sending messages
 	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
@@ -704,7 +763,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		fmt.Println("Received request to send message", req.Message, req.MediaPath)
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
+		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath, req.Mentions)
 		fmt.Println("Message sent", success, message)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")

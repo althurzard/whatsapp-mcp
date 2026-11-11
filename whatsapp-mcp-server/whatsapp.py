@@ -668,7 +668,13 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Chat]:
         if 'conn' in locals():
             conn.close()
 
-def send_message(recipient: str, message: str) -> Tuple[bool, str]:
+def group_members(group_jid: str) -> dict:
+    r = requests.get(f"{WHATSAPP_API_BASE_URL}/group_members", params={"jid": group_jid}, timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+
+def send_message(recipient: str, message: str, mentions: Optional[List[str]] = None) -> Tuple[bool, str]:
     try:
         # Validate input
         if not recipient:
@@ -679,6 +685,8 @@ def send_message(recipient: str, message: str) -> Tuple[bool, str]:
             "recipient": recipient,
             "message": message,
         }
+        if mentions:
+            payload["mentions"] = mentions
         
         response = requests.post(url, json=payload)
         

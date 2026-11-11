@@ -13,6 +13,7 @@ from whatsapp import (
     get_last_interaction as whatsapp_get_last_interaction,
     get_message_context as whatsapp_get_message_context,
     send_message as whatsapp_send_message,
+    group_members as whatsapp_group_members,
     send_file as whatsapp_send_file,
     send_audio_message as whatsapp_audio_voice_message,
     download_media as whatsapp_download_media
@@ -163,7 +164,8 @@ def get_message_context(
 
 @mcp.tool()
 def propose_reply(recipient: str, text: Optional[str] = None, media_path: Optional[str] = None,
-                  as_voice: bool = False, note: Optional[str] = None) -> Dict[str, Any]:
+                  as_voice: bool = False, note: Optional[str] = None,
+                  mentions: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
     """Đề xuất một tin WhatsApp. KHÔNG gửi ngay: tin vào hàng chờ duyệt. Sau khi tạo, LUÔN gửi preview cho người dùng
     (người nhận, nội dung nguyên văn / file đính kèm, draftId) và chờ họ nói "duyệt".
     Viết riêng cho từng người, không gửi hàng loạt, hạn chế link.
@@ -174,6 +176,9 @@ def propose_reply(recipient: str, text: Optional[str] = None, media_path: Option
         media_path: tuỳ chọn, đường dẫn tuyệt đối file ảnh/video/tài liệu/audio cần gửi
         as_voice: true = gửi media_path dạng voice message
         note: tuỳ chọn, giải thích ngắn cho người duyệt (không gửi đi)
+        mentions: tuỳ chọn (chỉ nhóm): người cần tag, mỗi phần tử {"jid": ..., "name": ...} lấy từ find_members.
+                  Trong text viết "@<name>" nguyên văn; khi gửi sẽ thành tag thật (WhatsApp hiện tên người đó).
+                  KHÔNG viết số điện thoại sau @.
     """
     if not recipient:
         return {"success": False, "message": "Recipient must be provided"}
@@ -185,10 +190,38 @@ def propose_reply(recipient: str, text: Optional[str] = None, media_path: Option
         return {"success": False, "message": "Tách thành 2 nháp: một text, một media (bridge không gửi caption kèm)"}
     if media_path and not os.path.isfile(media_path):
         return {"success": False, "message": f"Không thấy file: {media_path}"}
+    ms = []
+    for m in mentions or []:
+        jid, name = (m or {}).get("jid", ""), (m or {}).get("name", "")
+        if "@" not in jid or not name:
+            return {"success": False, "message": f"mention cần jid + name từ find_members: {m}"}
+        if f"@{name}" not in (text or ""):
+            return {"success": False, "message": f'text phải chứa "@{name}" nguyên văn'}
+        ms.append({"jid": jid, "name": name})
     kind = "text" if text else ("voice" if as_voice else "file")
-    d = drafts.create(kind, recipient, text=text, media_path=media_path, note=note)
+    d = drafts.create(kind, recipient, text=text, media_path=media_path, note=note, mentions=ms)
     return {"success": True, "draft": d,
             "next": "Gửi preview nguyên văn cho người dùng và chờ họ nói 'duyệt' trước khi gọi approve_draft."}
+
+@mcp.tool()
+def find_members(chat_jid: str, query: Optional[str] = None) -> Dict[str, Any]:
+    """Tìm thành viên nhóm để tag (@mention). Trả jid + tên hiển thị; dùng tên đó nguyên văn sau "@" trong
+    propose_reply và truyền {"jid", "name"} vào mentions.
+
+    Args:
+        chat_jid: JID nhóm (…@g.us)
+        query: một phần tên hoặc số (để trống = tất cả)
+    """
+    try:
+        data = whatsapp_group_members(chat_jid)
+    except Exception as e:
+        return {"error": f"Không lấy được thành viên: {e}"}
+    q = (query or "").lower()
+    members = [m for m in data.get("members", [])
+               if not q or q in (m.get("name") or "").lower() or q in (m.get("phone") or "")]
+    for m in members:
+        m["name"] = m.get("name") or m.get("phone") or m["jid"].split("@")[0]
+    return {"group": data.get("name"), "members": members}
 
 @mcp.tool()
 def list_drafts() -> List[Dict[str, Any]]:
@@ -219,7 +252,11 @@ def approve_draft(draft_id: str, text: Optional[str] = None, media_path: Optiona
         return {"success": False, "message": "media_path không khớp nháp đã preview"}
     drafts.wait_gap()
     if d["kind"] == "text":
-        ok, msg = whatsapp_send_message(d["recipient"], d["text"])
+        body, jids = d["text"], []
+        for m in sorted(d.get("mentions") or [], key=lambda m: -len(m["name"])):
+            body = body.replace(f"@{m['name']}", f"@{m['jid'].split('@')[0]}")
+            jids.append(m["jid"])
+        ok, msg = whatsapp_send_message(d["recipient"], body, jids or None)
     elif d["kind"] == "voice":
         ok, msg = whatsapp_audio_voice_message(d["recipient"], d["media_path"])
     else:
